@@ -101,6 +101,12 @@ class UNetModel:
         #     self.validation_writer = SummaryWriter(comment='_validation')
         # self.iteration = 0
 
+    def check_nan_grad(net):
+        for name, param in net.named_parameters():
+            if param.grad is not None and torch.isnan(param.grad).any():
+                return True
+        return False
+    
     def get_dataloader(exp_config):
         train_dataset, val_dataset = get_mmis_dataset(exp_config)
         print("Number of training/val:", (len(train_dataset), len(val_dataset)))
@@ -114,33 +120,145 @@ class UNetModel:
         self.logger.info('Current filters: {}'.format(self.exp_config.filter_channels))
         self.logger.info('Batch size: {}'.format(self.batch_size))
 
-        iteration = 0
         for epoch in range(self.exp_config.epochs_to_train):
             self.logger.info(f"Epoch {epoch+1}/{self.exp_config.epochs_to_train}")
-            for mask, patch in train_loader:
-                iteration += 1
+            epoch_loss = 0.0
 
-                patch = patch.to(self.device)
+            for step, (mask, image) in enumerate(train_loader, start=1):
+                image = image.to(self.device)
                 mask = mask.to(self.device)
-                _ = self.net(patch, mask, training=True)
 
-                # Tính loss (giả sử trong network đã định nghĩa hàm loss)
+                _ = self.net(image, mask, training=True)
                 loss = self.net.loss(mask)
 
-                # Backward và update tham số
+                if torch.isnan(loss) or UNetModel.check_nan_grad(self.net):
+                    self.logger.warning(f"NaN loss tại epoch {epoch+1}, step {step} — bỏ qua")
+                    continue
+
+                # Backward + update
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
 
-                # Update scheduler dựa trên loss
-                self.scheduler.step(loss)
-                if iteration % self.exp_config.logging_frequency == 0:
-                    self.logger.info(f"Iteration {iteration} - Loss: {loss.item()}")
+                # Scheduler: nếu dùng ReduceLROnPlateau thì step(loss), ngược lại step()
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(loss)
+                else:
+                    self.scheduler.step()
 
-                # Thực hiện validate định kỳ
-                # if iteration % self.exp_config.validation_frequency == 0:
-                #     self.validate(val_loader)
-        self.logger.info("Đã hoàn thành quá trình training.")
+                # Cộng dồn và log theo bước
+                epoch_loss += loss.item()
+                if step % self.exp_config.logging_frequency == 0:
+                    self.logger.info(f"  [Iter {step}] Loss: {loss.item():.4f}")
+
+            # Tính và log average loss của epoch
+            avg_loss = epoch_loss / len(train_loader)
+            self.logger.info(f"==> Epoch {epoch+1} average loss: {avg_loss:.4f}")
+
+            # Save model theo chu kỳ (mỗi validation_frequency epoch)
+            if (epoch+1) % self.exp_config.validation_frequency == 0:
+                savename = f"epoch_{epoch+1}"
+                self.save_model(savename)
+                self.logger.info(f"✔ Saved model checkpoint: {savename}")
+                self.logger.info(f"=== Validation at iteration {epoch+1} ===")
+                self.validate(val_loader)
+
+        self.logger.info('=== Hoàn thành training ===')
+
+    def validate(self, val_loader):
+        self.net.eval()
+        with torch.no_grad():
+
+            # Lưu tạm checkpoint
+            self.save_model('validation_ckpt')
+            if self.device.type == 'cuda':
+                mem = torch.cuda.max_memory_allocated(self.device)
+                self.logger.info(f"Max CUDA memory allocated: {mem}")
+
+            # Khởi tạo list chứa metric
+            ged_list, dice_list, ncc_list = [], [], []
+            elbo_list, kl_list, recon_list = [], [], []
+
+            start_time = time.time()
+            for step, (mask, image) in enumerate(val_loader, start=1):
+                # Đưa lên device
+                image = image.to(self.device)
+                if mask.dim() == 4 and mask.size(1) == 1:
+                    mask = mask.squeeze(1)
+                mask = mask.to(self.device)
+
+                # Forward + output probabilistic
+                s_out = self.net.forward(image, mask, training=False)
+                s_soft = self.net.accumulate_output(s_out, use_softmax=True)
+
+                # Loss components
+                loss = self.net.loss(mask)
+                elbo_list.append(loss.item())
+                kl_list.append(self.net.kl_divergence_loss.item())
+                recon_list.append(self.net.reconstruction_loss.item())
+
+                # Mean softmax và argmax
+                s_mean = s_soft.mean(dim=0)
+                s_arg  = s_soft.argmax(dim=1)
+
+                # GED, NCC
+                ged = utils.generalised_energy_distance(s_arg, mask,
+                                                        nlabels=self.exp_config.n_classes-1)
+                gt_onehot = utils.convert_batch_to_onehot(mask.unsqueeze(1),
+                                                        nlabels=self.exp_config.n_classes)
+                ncc = utils.variance_ncc_dist(s_soft, gt_onehot)
+
+                ged_list.append(ged)
+                ncc_list.append(ncc)
+
+                # Dice per-class
+                per_lbl = []
+                pred = s_mean.argmax(dim=0)
+                for lbl in range(self.exp_config.n_classes):
+                    p_bin = (pred == lbl).long()
+                    g_bin = (mask == lbl).long()
+                    inter = (p_bin * g_bin).sum().item()
+                    union = p_bin.sum().item() + g_bin.sum().item()
+                    dice = 1.0 if union == 0 else 2 * inter / union
+                    per_lbl.append(dice)
+                dice_list.append(per_lbl)
+
+            # Tổng hợp metric
+            dice_t = torch.tensor(dice_list)
+            self.avg_dice       = dice_t.mean().item()
+            self.foreground_dice= dice_t[:,1].mean().item()
+            self.val_elbo       = sum(elbo_list)/len(elbo_list)
+            self.val_kl_loss    = sum(kl_list)/len(kl_list)
+            self.val_recon_loss = sum(recon_list)/len(recon_list)
+            self.avg_ged        = float(sum(ged_list)/len(ged_list))
+            self.avg_ncc        = float(sum(ncc_list)/len(ncc_list))
+
+            # Ghi log
+            elapsed = time.time() - start_time
+            self.logger.info(f"Validation time: {elapsed:.2f}s")
+            self.logger.info(f"Avg Dice: {self.avg_dice:.4f}, FG Dice: {self.foreground_dice:.4f}")
+            self.logger.info(f"ELBO: {self.val_elbo:.4f}, KL: {self.val_kl_loss:.4f}, Recon: {self.val_recon_loss:.4f}")
+            self.logger.info(f"GED: {self.avg_ged:.4f}, NCC: {self.avg_ncc:.4f}")
+
+            # Lưu best-checkpoints
+            if self.avg_dice > self.best_dice:
+                self.best_dice = self.avg_dice
+                self.logger.info(f"New best Dice: {self.best_dice:.4f}")
+                self.save_model('best_dice')
+            if self.val_elbo < self.best_loss:
+                self.best_loss = self.val_elbo
+                self.logger.info(f"New best ELBO: {self.best_loss:.4f}")
+                self.save_model('best_loss')
+            if self.avg_ged < self.best_ged:
+                self.best_ged = self.avg_ged
+                self.logger.info(f"New best GED: {self.best_ged:.4f}")
+                self.save_model('best_ged')
+            if self.avg_ncc > self.best_ncc:
+                self.best_ncc = self.avg_ncc
+                self.logger.info(f"New best NCC: {self.best_ncc:.4f}")
+                self.save_model('best_ncc')
+
+        self.net.train()
 
 
     # def validate(self, data):
