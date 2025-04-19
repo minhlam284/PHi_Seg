@@ -6,7 +6,7 @@ from dataset import get_mmis_dataset
 experiment_name = 'PHISegBig'
 log_dir_name = 'mmis'
 
-data_dir = '/Users/kaiser_1/Documents/Data/data/mmis'
+data_dir = '/mnt/apple/k66/minhlam/phiseg/mmis'
 mask_type = 'random'
 num_workers = 4
 
@@ -15,7 +15,7 @@ num_workers = 4
 filter_channels = [32, 64, 128, 192, 256, 256, 256]
 latent_levels = 5
 
-iterations = 2
+# iterations = 2
 
 n_classes = 2
 num_labels_per_subject = 4
@@ -28,7 +28,7 @@ exponential_weighting = True
 
 # use 1 for grayscale, 3 for RGB images
 input_channels = 3
-epochs_to_train = 20
+epochs_to_train = 500
 batch_size = 32
 image_size = (3, 128, 128)
 
@@ -43,8 +43,8 @@ input_normalisation = normalise_image
 validation_samples = 16
 num_validation_images = 100
 
-logging_frequency = 1000
-validation_frequency = 1000
+logging_frequency = 50
+validation_frequency = 50
 
 weight_decay = 10e-5
 
