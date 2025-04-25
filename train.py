@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 # own files
 import utils
 
-from dataset import get_mmis_dataset
+from data import get_mmis_dataset
 
 # catch all the warnings with the debugger
 # import warnings
