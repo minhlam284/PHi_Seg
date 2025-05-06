@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from torch.utils.tensorboard import SummaryWriter, FileWriter
+# from torch.utils.tensorboard import SummaryWriter, FileWriter
 from torch import autograd
 import config.local_config as sys_config
 # Python bundle packages
@@ -39,8 +39,7 @@ class UNetModel:
         self.net.to(self.device)
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr = 1e-3, weight_decay=1e-5)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, 'min', min_lr = 1e-4, verbose=True, patience=50000
-        )
+            self.optimizer, 'min',verbose=True, min_lr = 1e-4, patience=50000)
         if exp_config.pretrained_model is not None:
             self.logger.info('Loading pretrained model {}'.format(exp_config.pretrained_model))
 
@@ -74,10 +73,10 @@ class UNetModel:
         self.best_ged = np.inf
         self.best_ncc = -1
 
-        if tensorboard:
-            self.training_writer = SummaryWriter()
-            self.validation_writer = SummaryWriter(comment='_validation')
-        self.iteration = 0
+        # if tensorboard:
+        #     self.training_writer = SummaryWriter()
+        #     self.validation_writer = SummaryWriter(comment='_validation')
+        # self.iteration = 0
     
     def train(self, data):
         self.net.train()
@@ -87,12 +86,12 @@ class UNetModel:
         
         for self.iteration in tqdm(range(1, self.exp_config.iterations)):
             x_b, s_b = next(data.train) 
-            print(f"x_b shape: {x_b.shape}") #(Batch, 3, H, W) -> (batch, 3, 128, 128)
-            print(f"s_b shape: {s_b.shape}") #(Batch, 1, H, W) -> (batch, 1, 128, 128)
+            # print(f"x_b shape: {x_b.shape}") #(Batch, 3, H, W) -> (batch, 3, 128, 128)
+            # print(f"s_b shape: {s_b.shape}") #(Batch, 1, H, W) -> (batch, 1, 128, 128)
             patch = torch.tensor(x_b, dtype=torch.float32).to(self.device) #(Batch, 3, H, W) -> (batch, 3, 128, 128)
             mask = torch.tensor(s_b, dtype=torch.float32).to(self.device) #(Batch, 1, H, W) -> (batch, 1, 128, 128)
-            print(f"patch shape: {patch.shape}")
-            print(f"mask shape: {mask.shape}")
+            # print(f"patch shape: {patch.shape}")
+            # print(f"mask shape: {mask.shape}")
             self.mask = mask
             self.patch= patch
             # import IPython; IPython.embed()
@@ -111,6 +110,7 @@ class UNetModel:
 
             if self.iteration % self.exp_config.validation_frequency == 0:
                 self.validate(data)
+                self.save_model(f"checkpoint_{self.iteration}")
             if self.iteration % self.exp_config.logging_frequency == 0:
                 self.logger.info('Iteration {} Loss {}'.format(self.iteration, self.loss))
                 #self._create_tensorboard_summary()
@@ -127,7 +127,7 @@ class UNetModel:
         with torch.no_grad():
             self.logger.info('Validation for step {}'.format(self.iteration, self.loss))
             self.logger.info('Checkpointing model.')
-            self.save_model('validation_ckpt')
+            # self.save_model('validation_ckpt')
             if self.device == torch.device('cuda'):
                 allocated_memory = torch.cuda.max_memory_allocated(self.device)
 
@@ -144,8 +144,8 @@ class UNetModel:
 
             for id in range(len(data.val)):
                 x_b, s_b = data.val[id] 
-                print(f"x_b_val shape {x_b.shape}") #(3, 128, 128)
-                print(f"s_b_val shape {s_b.shape}") #(1, 128, 128)
+                # print(f"x_b_val shape {x_b.shape}") #(3, 128, 128)
+                # print(f"s_b_val shape {s_b.shape}") #(1, 128, 128)
                 patch = torch.tensor(x_b, dtype=torch.float32).to(self.device) #(3, H, W)
                 val_patch = patch.unsqueeze(dim=0) #(3, H, W) -> (1, 3, H, W)                                                 
 
@@ -161,7 +161,7 @@ class UNetModel:
                 self.patch = patch_arrangement
 
                 s_out_eval_list = self.net.forward(patch_arrangement, mask_arrangement, training = False)
-                s_prediction_softmax_arrangement = self.net.accumulate_outputs(s_out_eval_list, use_softmax=True)
+                s_prediction_softmax_arrangement = self.net.accumulate_output(s_out_eval_list, use_softmax=True)
 
                 self.val_loss = self.net.loss(mask_arrangement)
                 elbo = self.val_loss
@@ -181,7 +181,7 @@ class UNetModel:
                 ncc = utils.variance_ncc_dist(s_prediction_softmax_arrangement, ground_truth_arrangement_one_hot)
 
                 s_ = torch.argmax(s_prediction_softmax_mean, dim = 0)
-                s = val_mask.view(val_mask.shape[-2], val_mask[-1])
+                s = val_mask.squeeze()
 
                 per_lbl_dice = []
 
@@ -445,6 +445,7 @@ class UNetModel:
 
                 self.save_images(image_path, patch, val_masks, s_, ii)
 
+
     def save_images(self, save_location, image, ground_truth_labels, sample,
                     iteration):
         from torchvision.utils import save_image
@@ -468,8 +469,8 @@ class UNetModel:
 
     def save_model(self, savename):
         model_name = self.exp_config.experiment_name + '_' + savename + '.pth'
-
         log_dir = os.path.join(sys_config.log_root, exp_config.log_dir_name, exp_config.experiment_name)
+
         save_model_path = os.path.join(log_dir, model_name)
         torch.save(self.net.state_dict(), save_model_path)
         self.logger.info('saved model to .pth file in {}'.format(save_model_path))
@@ -489,8 +490,8 @@ if __name__ == '__main__':
         print('Running with local configuration')
         import config.local_config as sys_config
         import matplotlib.pyplot as plt
-    else:
-        import config.system as sys_config
+    # else:
+        # import config.system as sys_config
 
     exp_config = SourceFileLoader(config_module, config_file).load_module()
 
