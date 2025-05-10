@@ -71,9 +71,9 @@ class MSMRIDataset(Dataset):
 
 class mmis_data:
     def __init__(self, batch_size, num_workers):
-        trainset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/data/mmis', train_val_test_dir="Train")
-        valset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/data/mmis', train_val_test_dir="Val")
-        testset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/data/mmis', train_val_test_dir="Val")
+        trainset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/mmis_test', train_val_test_dir="Train")
+        valset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/mmis_test', train_val_test_dir="Val")
+        testset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/mmis_test', train_val_test_dir="Val")
 
         self.train = cycle(DataLoader(trainset, batch_size=batch_size, num_workers=num_workers, shuffle=True))
         self.val = valset
@@ -99,41 +99,48 @@ if __name__ == "__main__":
     
     fig, axs = plt.subplots(3, 3, figsize=(15, 10))
     
-    axs[0, 0].imshow(image[:,:,0], cmap='gray')
+    axs[0, 0].imshow(image[0,:,:], cmap='gray')
     axs[0, 0].set_title('T1')
     axs[0, 0].axis("off")
     
-    axs[0, 1].imshow(image[:,:,1], cmap='gray')
+    axs[0, 1].imshow(image[1,:,:], cmap='gray')
     axs[0, 1].set_title('T1C')
     axs[0, 1].axis("off")
     
-    axs[0, 2].imshow(image[:,:,2], cmap='gray')
+    axs[0, 2].imshow(image[2,:,:], cmap='gray')
     axs[0, 2].set_title('T2')
     axs[0, 2].axis("off")
-    
-    sns.heatmap(mask_var, ax=axs[1, 0], cmap="viridis")
-    axs[1, 0].set_title('Variance Heatmap')
-    axs[1, 0].axis("off")
 
-    axs[1, 1].imshow(mask_e, cmap='gray')
+    mask_var_2d = mask_var[0]
+    axs[1, 0].imshow(mask_var_2d, cmap='viridis')
+    axs[1, 0].set_title('Variance Heatmap')
+    axs[1, 0].axis('off')
+
+    mask_e_2d = mask_e[0]
+    axs[1, 1].imshow(mask_e_2d, cmap='gray')
     axs[1, 1].set_title('Mask_e')
     axs[1, 1].axis("off")
 
-    axs[1, 2].imshow(masks[:,:,0], cmap='gray')
+    mask0 = masks[0, 0, :, :]        # shape (128, 128)
+    mask1 = masks[1, 0, :, :]
+    mask2 = masks[2, 0, :, :]
+    mask3 = masks[3, 0, :, :]  
+    axs[1, 2].imshow(mask0, cmap='gray')
     axs[1, 2].set_title('Mask_1')
     axs[1, 2].axis("off")
     
-    axs[2, 0].imshow(masks[:,:,1], cmap='gray')
+    axs[2, 0].imshow(mask1, cmap='gray')
     axs[2, 0].set_title('Mask_2')
     axs[2, 0].axis("off")
     
-    axs[2, 1].imshow(masks[:,:,2], cmap='gray')
+    axs[2, 1].imshow(mask2, cmap='gray')
     axs[2, 1].set_title('Mask_3')
     axs[2, 1].axis("off")
     
-    axs[2, 2].imshow(masks[:,:,3], cmap='gray')
+    axs[2, 2].imshow(mask3, cmap='gray')
     axs[2, 2].set_title('Mask_4')
     axs[2, 2].axis("off")
     
     plt.tight_layout()
     plt.show()
+
