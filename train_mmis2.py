@@ -67,6 +67,18 @@ class UNetModel:
         self.logger.info('Batch size: %d', self.batch_size)
         for self.iteration in tqdm(range(1, self.exp_config.iterations)):
             x_b, s_b = next(data.train)
+            if isinstance(x_b, torch.Tensor):
+                print(f"x_b type: {type(x_b)}, shape: {x_b.shape}, min: {x_b.min().item()}, max: {x_b.max().item()}, mean: {x_b.mean().item()}")
+            else:
+                print(f"x_b type: {type(x_b)}, shape: {x_b.shape}, min: {np.min(x_b)}, max: {np.max(x_b)}, mean: {np.mean(x_b)}")
+            if isinstance(s_b, torch.Tensor):
+                print(f"s_b type: {type(s_b)}, shape: {s_b.shape}, unique values: {torch.unique(s_b)}")
+            else:
+                print(f"s_b type: {type(s_b)}, shape: {s_b.shape}, unique values: {np.unique(s_b)}")
+            print(f"s_b min: {s_b.min().item()}, max: {s_b.max().item()}, mean: {s_b.mean().item()}")
+            print(f"s_b unique values (rounded): {torch.unique(s_b.round())}")
+            # s_b = (s_b * 255).long()
+            print(f"s_b min: {s_b.min().item()}, max: {s_b.max().item()}, unique values: {torch.unique(s_b)}")
             patch = torch.tensor(x_b, dtype=torch.float32).to(self.device)
             mask = torch.tensor(s_b, dtype=torch.float32).to(self.device)
             # forward
@@ -78,7 +90,7 @@ class UNetModel:
             self.optimizer.step()
             # validation and checkpoint
             if self.iteration % self.exp_config.validation_frequency == 0:
-                self.validate(data)
+                # self.validate(data)
                 self.save_model(f"checkpoint_{self.iteration}")
             # logging
             if self.iteration % self.exp_config.logging_frequency == 0:
@@ -90,64 +102,61 @@ class UNetModel:
         self.net.eval()
         with torch.no_grad():
             self.logger.info('Validation at iteration %d', self.iteration)
-            ged_list, ncc_list = [], []
-            dice_list_per_case = []
             elbo_list, kl_list, recon_list = [], [], []
-            start_time = time.time()
+            dice_list, ged_list, ncc_list = [], [], []
+            start = time.time()
 
-            for idx in range(len(data.val)):
-                x_b, s_b = data.val[idx]
-                patch = torch.tensor(x_b, dtype=torch.float32).to(self.device).unsqueeze(0)
-                # handle list of annotations
-                mask_arr_np = np.array(s_b)       # (num_annotators, H, W)
-                mask_np = mask_arr_np[0]          # first annotator
-                mask = torch.tensor(mask_np, dtype=torch.float32).to(self.device).unsqueeze(0).unsqueeze(1)
-                # repeat B samples
+            for x_b, s_b in data.val:
+                # prepare input
+                patch = torch.tensor(x_b, dtype=torch.float32, device=self.device).unsqueeze(0)
+                mask_np = np.array(s_b)[0]  # use first annotator (H, W)
+                mask = torch.tensor(mask_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+                print(f"mask_shape:{mask.shape}, mask_dim:{mask.dim()}")
+
+                # repeat for posterior sampling
                 B = self.exp_config.validation_samples
                 patch_arr = patch.repeat(B, 1, 1, 1)
                 mask_arr = mask.repeat(B, 1, 1, 1)
-                # forward and softmax accumulate
+
+                # posterior pass for both losses and segmentation samples
                 s_list = self.net.forward(patch_arr, mask_arr, training=False)
-                softmax_arr = self.net.accumulate_output(s_list, use_softmax=True)
-                # record losses
-                val_loss = self.net.loss(mask_arr)
-                elbo_list.append(val_loss.item())
+                softmax_arr = self.net.accumulate_output(s_list, use_softmax=True)  # (B,C,H,W)
+
+                # losses
+                elbo_list.append(self.net.loss(mask_arr).item())
                 kl_list.append(self.net.kl_divergence_loss.item())
                 recon_list.append(self.net.reconstruction_loss.item())
-                # dice per sample
-                gt_np = mask_arr[0, 0].cpu().numpy()
-                dice_samples = []
-                for sample_probs in softmax_arr:
-                    pred_np = torch.argmax(sample_probs, dim=0).cpu().numpy()
-                    per_lbl = []
-                    for lbl in range(self.exp_config.n_classes):
-                        per_lbl.append(dc((pred_np == lbl).astype(np.uint8), (gt_np == lbl).astype(np.uint8)))
-                    dice_samples.append(per_lbl)
-                dice_arr = np.array(dice_samples)
-                dice_list_per_case.append(dice_arr.mean(axis=0))
-                # GED: convert arrays to torch Tensors
-                preds_np = np.stack([torch.argmax(p, dim=0).cpu().numpy() for p in softmax_arr])
-                gts_np = np.stack([gt_np for _ in range(preds_np.shape[0])])
-                preds_t = torch.tensor(preds_np, dtype=torch.int64, device=self.device)
-                gts_t = torch.tensor(gts_np, dtype=torch.int64, device=self.device)
-                ged = utils.generalised_energy_distance(
-                    preds_t, gts_t,
-                    nlabels=self.exp_config.n_classes - 1,
-                    label_range=range(1, self.exp_config.n_classes)
-                )
-                ged_list.append(ged)
-                # NCC: use torch Tensors
-                probs_t = softmax_arr.detach().cpu()  # Tensor (B, C, H, W)
-                gt_tensor = torch.tensor(gt_np, dtype=torch.int64, device=self.device)
-                gt_one_hot_t = utils.convert_batch_to_onehot(
-                    gt_tensor.unsqueeze(0).unsqueeze(0),
-                    nlabels=self.exp_config.n_classes
-                ).to(self.device)
-                ncc = utils.variance_ncc_dist(probs_t, gt_one_hot_t)
-                ncc_list.append(ncc)
 
-            # aggregate
-            dice_per_structure = np.stack(dice_list_per_case).mean(axis=0)
+                # Dice per sample
+                dice_per_sample = []
+                for b in range(B):
+                    pred_np = softmax_arr[b].argmax(dim=0).cpu().numpy()
+                    dice_vals = [dc((pred_np == lbl).astype(np.uint8), (mask_np == lbl).astype(np.uint8))
+                                    for lbl in range(self.exp_config.n_classes)]
+                    dice_per_sample.append(dice_vals)
+                dice_arr = np.array(dice_per_sample)
+                dice_list.append(dice_arr.mean(axis=0))
+
+                # GED
+                preds = softmax_arr.argmax(dim=1)  # (B,H,W)
+                gts = torch.tensor(mask_np, dtype=torch.int64, device=self.device).expand(B, -1, -1)
+                ged_val = utils.generalised_energy_distance(preds, gts,
+                                                            nlabels=self.exp_config.n_classes - 1,
+                                                            label_range=range(1, self.exp_config.n_classes))
+                ged_list.append(ged_val)
+
+                # NCC
+                gt_one_hot = utils.convert_batch_to_onehot(
+                    torch.tensor(mask_np, device=self.device).unsqueeze(0).unsqueeze(0),
+                    nlabels=self.exp_config.n_classes
+                ).to(self.device)# → shape (1, C, H, W)
+                B = self.exp_config.validation_samples
+                gt_one_hot = gt_one_hot.repeat(B, 1, 1, 1) # → shape (B, C, H, W)
+                ncc_val = utils.variance_ncc_dist(softmax_arr, gt_one_hot)
+                ncc_list.append(ncc_val)
+
+            # aggregate metrics
+            dice_per_structure = np.stack(dice_list).mean(axis=0)
             self.avg_dice = float(dice_per_structure.mean())
             self.foreground_dice = float(dice_per_structure[1])
             self.val_elbo = float(np.mean(elbo_list))
@@ -161,27 +170,23 @@ class UNetModel:
             self.logger.info(' - Mean GED: %.4f', self.avg_ged)
             self.logger.info(' - Mean NCC: %.4f', self.avg_ncc)
 
-            # save best metrics
+            # update bests
             if self.avg_dice > self.best_dice:
                 self.best_dice = self.avg_dice
-                self.logger.info('New best Dice: %.4f', self.best_dice)
                 self.save_model('best_dice')
             if self.val_elbo < self.best_loss:
                 self.best_loss = self.val_elbo
-                self.logger.info('New best loss: %.4f', self.best_loss)
                 self.save_model('best_loss')
             if self.avg_ged < self.best_ged:
                 self.best_ged = self.avg_ged
-                self.logger.info('New best GED: %.4f', self.best_ged)
                 self.save_model('best_ged')
             if self.avg_ncc > self.best_ncc:
                 self.best_ncc = self.avg_ncc
-                self.logger.info('New best NCC: %.4f', self.best_ncc)
                 self.save_model('best_ncc')
 
-            self.logger.info('Validation took %.2f seconds', time.time() - start_time)
-        # back to train mode
+            self.logger.info('Validation took %.2f s', time.time() - start)
         self.net.train()
+
 
     def save_model(self, savename):
         model_name = f"{self.exp_config.experiment_name}_{savename}.pth"
