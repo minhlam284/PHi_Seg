@@ -6,17 +6,44 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 from itertools import cycle
+from torchvision.transforms import InterpolationMode
 
-class MSMRIDataset(Dataset):
+import albumentations as A
+from albumentations.pytorch.transforms import ToTensorV2
 
-    dataset_url = None
+class TransformDataset(Dataset):
+
+    def __init__(self, dataset: Dataset, image_size: int):
+        self.dataset = dataset
+        self.transform = A.Compose(transforms=[A.Resize(image_size, image_size),
+                                            A.HorizontalFlip(p=0.5),
+                                            ToTensorV2()])
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        image, mask = self.dataset[idx]
+        # print(mask.shape, mask.dtype, mask.max())
+        if isinstance(mask, list):
+            transformed = self.transform(image=image, masks=mask)
+            mask = [m.unsqueeze(0).to(torch.float32) for m in transformed["masks"]]
+        else:
+            transformed = self.transform(image=image, mask=mask)
+            mask = transformed["mask"].unsqueeze(0).to(torch.float32)
+            # print(mask.shape, mask.dtype, mask.max())
+        return transformed["image"].to(torch.float32), mask
+
+class MMISDataset(Dataset):
+
+    dataset_url = "https://mmis2024.com/info?task=1"
     masks_per_image = 4
 
     def __init__(
         self,
         data_dir: str = 'data',
         train_val_test_dir: str = None,
-        mask_type: Literal["ensemble", "random", "multi"] = "random",
+        mask_type: Literal["ensemble", "random", "multi"] = "ensemble",
     ) -> None:
         super().__init__()
 
@@ -33,10 +60,6 @@ class MSMRIDataset(Dataset):
             for img_path in glob.glob(img_dir)
         ]
         self.mask_type = mask_type
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Resize((128, 128))
-        ])
 
     def prepare_data(self) -> None:
         pass
@@ -46,41 +69,41 @@ class MSMRIDataset(Dataset):
 
     def __getitem__(self, index):
         img_path = self.img_paths[index]
+        
         image = np.load(img_path)
-        print(image.shape)
         if image.max() > image.min():
             image = (image - image.min()) / (image.max() - image.min())
-        image = self.transform(image)
-        image = image.type(torch.FloatTensor)
-        
+        # print(image.shape)
         mask_path = img_path.replace('image', 'label')
         mask = np.load(mask_path).astype(np.uint8)
-        mask = self.transform(mask)
-
+        
         if self.mask_type == "random":
             mask_id = random.randint(0, self.masks_per_image - 1)
-            mask = mask[mask_id, ...]
-            mask = mask.type(torch.FloatTensor).unsqueeze(0)
+            mask = mask[:, :, mask_id]
         elif self.mask_type == "ensemble":
-            mask = mask.mean(axis=0)
-            mask = mask.type(torch.FloatTensor)
+            mask = mask.mean(axis=-1)
+            mask = (mask > 0.5).astype(np.uint8)
         elif self.mask_type == "multi":
-            mask = [mask[i, ...].type(torch.FloatTensor).unsqueeze(0) for i in range(self.masks_per_image)]
+            mask = [mask[:,:, i] for i in range(self.masks_per_image)]
         
         return image, mask
 
+
 class mmis_data:
     def __init__(self, batch_size, num_workers):
-        trainset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/mmis_test', train_val_test_dir="Train")
-        valset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/mmis_test', train_val_test_dir="Val")
-        testset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/mmis_test', train_val_test_dir="Val")
+        trainset = MMISDataset(data_dir='/Users/kaiser_1/Documents/Data/mmis_test',mask_type="random", train_val_test_dir="Train")
+        trainset = TransformDataset(trainset, image_size=128)
+        valset = MMISDataset(data_dir='/Users/kaiser_1/Documents/Data/mmis_test',mask_type="multi", train_val_test_dir="Val")
+        valset = TransformDataset(valset, image_size=128)
+        testset = MMISDataset(data_dir='/Users/kaiser_1/Documents/Data/mmis_test', train_val_test_dir="Val")
+        testset = TransformDataset(testset, image_size=128)
 
         self.train = cycle(DataLoader(trainset, batch_size=batch_size, num_workers=num_workers, shuffle=True))
         self.val = valset
         self.test = testset
 
 if __name__ == "__main__":
-    dataset = MSMRIDataset(data_dir='/Users/kaiser_1/Documents/Data/data/mmis', mask_type="multi")
+    dataset = MMISDataset(data_dir='/Users/kaiser_1/Documents/Data/data/mmis', mask_type="multi")
     print(len(dataset))
 
     id = random.randint(0, len(dataset) - 1)
@@ -143,4 +166,6 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     plt.show()
+
+
 
