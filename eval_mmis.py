@@ -10,6 +10,33 @@ from tqdm import tqdm
 import numpy as np
 import os
 
+from torch.utils.data import Dataset
+import albumentations as A
+from albumentations.pytorch.transforms import ToTensorV2
+
+class TransformDataset(Dataset):
+
+    def __init__(self, dataset: Dataset, image_size: int):
+        self.dataset = dataset
+        self.transform = A.Compose(transforms=[A.Resize(image_size, image_size),
+                                            A.HorizontalFlip(p=0.5),
+                                            ToTensorV2()])
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        image, mask = self.dataset[idx]
+        # print(mask.shape, mask.dtype, mask.max())
+        if isinstance(mask, list):
+            transformed = self.transform(image=image, masks=mask)
+            mask = [m.unsqueeze(0).to(torch.float32) for m in transformed["masks"]]
+        else:
+            transformed = self.transform(image=image, mask=mask)
+            mask = transformed["mask"].unsqueeze(0).to(torch.float32)
+            # print(mask.shape, mask.dtype, mask.max())
+        return transformed["image"].to(torch.float32), mask
+
 def compute_metric(preds: List[torch.Tensor], gts: List[torch.Tensor], batch: int):
     """_summary_
     Args:
@@ -148,7 +175,7 @@ def save_image(labels, gts, preds, image_folder, batch):
     # gts: List[Tensor(b, w, h) x n]
     # preds: List[Tensor(b, w, h) x n]
     os.makedirs(image_folder, exist_ok=True)
-
+    image_name = os.path.splitext(os.path.basename(image_folder))[0]
     for i in range(labels.shape[0]):
         image = labels[i][0].numpy()
         plt.imsave(f"{image_folder}/image_{batch}_{i}.png", image, cmap="gray")
@@ -159,7 +186,7 @@ def save_image(labels, gts, preds, image_folder, batch):
             plt.imsave(f"{image_folder}/gt_{batch}_{i}_{id}.png", gt_image, cmap="gray")
         for id in range(len(preds)):
             pred_image = preds[id][i].cpu().numpy()
-            plt.imsave(f"{image_folder}/pred_{batch}_{i}_{id}.png", pred_image, cmap="gray")
+            plt.imsave(f"{image_name}.png", pred_image, cmap="gray")
 
 def post_process(logits):
     return logits.argmax(dim=1).to(torch.float32)
@@ -173,9 +200,9 @@ def main(args):
         file.write(f"batch_size: {args.batch_size}\n")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    testset = MMISDataset(data_dir="/Users/kaiser_1/Documents/Data/data/mmis", train_val_test_dir="Val", mask_type="multi")
-    test_loader = DataLoader(testset, batch_size=args.batch_size, num_workers=4, shuffle=False)
-
+    valset = MMISDataset(data_dir='/Users/kaiser_1/Documents/Data/data/mmis',mask_type="multi", train_val_test_dir="Val")
+    valset = TransformDataset(valset, image_size=128)
+    test_loader = DataLoader(valset, batch_size=args.batch_size, num_workers=2, shuffle=False)
     model = PHISeg(input_channels=3,
                     num_classes=2,
                     num_filters=[32, 64, 128, 192, 192, 192, 192],
