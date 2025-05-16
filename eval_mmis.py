@@ -175,7 +175,7 @@ def save_image(labels, gts, preds, image_folder, batch):
     # gts: List[Tensor(b, w, h) x n]
     # preds: List[Tensor(b, w, h) x n]
     os.makedirs(image_folder, exist_ok=True)
-    image_name = os.path.splitext(os.path.basename(image_folder))[0]
+
     for i in range(labels.shape[0]):
         image = labels[i][0].numpy()
         plt.imsave(f"{image_folder}/image_{batch}_{i}.png", image, cmap="gray")
@@ -186,7 +186,7 @@ def save_image(labels, gts, preds, image_folder, batch):
             plt.imsave(f"{image_folder}/gt_{batch}_{i}_{id}.png", gt_image, cmap="gray")
         for id in range(len(preds)):
             pred_image = preds[id][i].cpu().numpy()
-            plt.imsave(f"{image_name}.png", pred_image, cmap="gray")
+            plt.imsave(f"{image_folder}/pred_{batch}_{i}_{id}.png", pred_image, cmap="gray")
 
 def post_process(logits):
     return logits.argmax(dim=1).to(torch.float32)
