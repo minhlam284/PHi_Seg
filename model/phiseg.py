@@ -485,6 +485,8 @@ class PHISeg(nn.Module):
 
         recon_flat = reconstruction.view(batch_size, self.num_classes, -1)
         target_flat = target.view(batch_size, -1).long()
+        print(f"max_recon: {recon_flat.max()}, min:{recon_flat.min()}, shape: {recon_flat.shape}")
+        print(f"max: {target_flat.max()}, min:{target_flat.min()}, shape: {target_flat.shape}")
         return torch.mean(
             torch.sum(criterion(target=target_flat, input=recon_flat), dim=1)
         )
