@@ -269,7 +269,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process data based on version")
     parser.add_argument("--checkpoint", "-ckpt", default=None, type=str, help="Specify the checkpoint")
-    parser.add_argument("--batch_size", default=32, type=int, help="Override Batch size")
+    parser.add_argument("--batch_size", default=1, type=int, help="Override Batch size")
     parser.add_argument("--n_ensemble", default=1, type=int, help="Override number of samples to ensemble")
     parser.add_argument("--filename", default="eval", type=str, help="Specify the eval filename")
     args = parser.parse_args()
