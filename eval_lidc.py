@@ -10,7 +10,7 @@ from pathlib import Path
 from tqdm import tqdm
 import numpy as np
 import os
-
+from torch.utils.data import Subset
 from torch.utils.data import Dataset
 import albumentations as A
 from albumentations.pytorch.transforms import ToTensorV2
@@ -44,6 +44,19 @@ def compute_metric(preds: List[torch.Tensor], gts: List[torch.Tensor], batch: in
         preds (_type_): List[Tensor(b, w, h) x n]
         gts (_type_): List[Tensor(b, w, h) x m]
     """
+    def cross_entropy_map(pred, target, eps=1e-6):
+        """Compute per-pixel CE (no reduction)."""
+        pred = pred.clamp(min=eps, max=1 - eps)
+        return -(target * torch.log(pred) + (1 - target) * torch.log(1 - pred))
+    
+    def normalized_cross_correlation(x, y, eps=1e-6):
+        """Compute Normalized Cross Correlation between two maps."""
+        x_mean = torch.mean(x)
+        y_mean = torch.mean(y)
+        numerator = torch.sum((x - x_mean) * (y - y_mean))
+        denominator = torch.sqrt(torch.sum((x - x_mean)**2) * torch.sum((y - y_mean)**2)) + eps
+        return numerator / denominator
+    
     def compute_iou(output: torch.Tensor, target: torch.Tensor):
         """_summary_
         
@@ -112,41 +125,62 @@ def compute_metric(preds: List[torch.Tensor], gts: List[torch.Tensor], batch: in
             max_dice += max(dices)
         return max_dice / len(gts)
 
-    def compute_ncc(sample_masks: torch.Tensor,
-                               gt_masks:     torch.Tensor,
-                               eps:          float = 1e-8) -> torch.Tensor:
-        """
-        Args:
-        sample_masks:  Tensor of shape (N, H, W), integer values per pixel
-        gt_masks:      Tensor of shape (M, H, W),   integer values per pixel
-        Returns:
-        scalar Tensor: mean NCC score across the M ground-truth masks
-        """
-        # cast to float
-        samples = sample_masks.to(torch.float32)  # (N, H, W)
-        gts     = gt_masks.to(torch.float32)      # (M, H, W)
-        # print(f"samples shape: {samples.shape}, samples type:{samples.dtype}")
-        # print(f"gts shape: {gts.shape}, gts type:{gts.dtype}")
-        # Compute mean sample map
-        mean_sample = samples.mean(dim=0)         # (H, W)
+    # def compute_ncc(sample_masks: torch.Tensor,
+    #                            gt_masks:     torch.Tensor,
+    #                            eps:          float = 1e-8) -> torch.Tensor:
+    #     """
+    #     Args:
+    #     sample_masks:  Tensor of shape (N, H, W), integer values per pixel
+    #     gt_masks:      Tensor of shape (M, H, W),   integer values per pixel
+    #     Returns:
+    #     scalar Tensor: mean NCC score across the M ground-truth masks
+    #     """
+    #     # cast to float
+    #     samples = sample_masks.to(torch.float32)  # (N, H, W)
+    #     gts     = gt_masks.to(torch.float32)      # (M, H, W)
+    #     # print(f"samples shape: {samples.shape}, samples type:{samples.dtype}")
+    #     # print(f"gts shape: {gts.shape}, gts type:{gts.dtype}")
+    #     # Compute mean sample map
+    #     mean_sample = samples.mean(dim=0)         # (H, W)
 
-        # Flatten everything to vectors of length H*W
-        N, H, W = samples.shape
-        M, H, W = gts.shape
-        L = H * W
-        flat_mean = mean_sample.view(L)           # (L,)
-        flat_gts   = gts.view(M, L)               # (M, L)
-        mm = flat_mean.mean()
-        sm = flat_mean.std(unbiased=False) + eps
-        A_z = (flat_mean - mm) / sm               # (L,)
+    #     # Flatten everything to vectors of length H*W
+    #     N, H, W = samples.shape
+    #     M, H, W = gts.shape
+    #     L = H * W
+    #     flat_mean = mean_sample.view(L)           # (L,)
+    #     flat_gts   = gts.view(M, L)               # (M, L)
+    #     mm = flat_mean.mean()
+    #     sm = flat_mean.std(unbiased=False) + eps
+    #     A_z = (flat_mean - mm) / sm               # (L,)
 
-        gm = flat_gts.mean(dim=1, keepdim=True)   # (M,1)
-        sm2 = flat_gts.std(dim=1, unbiased=False, keepdim=True) + eps  # (M,1)
-        G_z = (flat_gts - gm) / sm2               # (M, L)
-        ncc_per_gt = (G_z * A_z).sum(dim=1) / L   # (M,)
+    #     gm = flat_gts.mean(dim=1, keepdim=True)   # (M,1)
+    #     sm2 = flat_gts.std(dim=1, unbiased=False, keepdim=True) + eps  # (M,1)
+    #     G_z = (flat_gts - gm) / sm2               # (M, L)
+    #     ncc_per_gt = (G_z * A_z).sum(dim=1) / L   # (M,)
 
-        # return average
-        return ncc_per_gt.mean()
+    #     # return average
+    #     return ncc_per_gt.mean()
+
+    def compute_sncc(pred_samples, gt_annotations):
+
+        mean_pred = torch.mean(pred_samples, dim=0)  # shape: (C, H, W)
+        
+        # Compute CE(bar_s, s) for each sample
+        ce_bar_s_s = [cross_entropy_map(mean_pred, s) for s in pred_samples]
+        ce_bar_s_s = torch.stack(ce_bar_s_s)  # (N_samples, C, H, W)
+        mean_ce_bar_s_s = torch.mean(ce_bar_s_s, dim=0)  # (C, H, W)
+
+        sncc_scores = []
+        for y in gt_annotations:
+            ce_y_s = [cross_entropy_map(y, s) for s in pred_samples]
+            ce_y_s = torch.stack(ce_y_s)
+            mean_ce_y_s = torch.mean(ce_y_s, dim=0)
+            
+            # Compute NCC between the two maps
+            ncc = normalized_cross_correlation(mean_ce_bar_s_s, mean_ce_y_s)
+            sncc_scores.append(ncc)
+
+        return torch.mean(torch.tensor(sncc_scores))
 
     ged, ncc, max_dice, dice, iou = 0, 0, 0, 0, 0
 
@@ -161,7 +195,7 @@ def compute_metric(preds: List[torch.Tensor], gts: List[torch.Tensor], batch: in
         # _gts: m, w, h
         ged += compute_ged(_preds, _gts)
         max_dice += compute_max_dice(_preds, _gts)
-        ncc += compute_ncc(_preds, _gts)
+        ncc += compute_sncc(_preds, _gts)
 
         pred = _preds.mean(dim=0) # w, h
         gt = _gts.mean(dim=0) # w, h
@@ -203,6 +237,7 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     valset = LIDCDataset(data_dir='/Users/kaiser_1/Documents/Data/data/lidc',mask_type="multi", train_val_test_dir="Val")
     valset = TransformDataset(valset, image_size=128)
+    # valset = Subset(valset, list(range(16)))
     test_loader = DataLoader(valset, batch_size=args.batch_size, num_workers=2, shuffle=False)
     model = PHISeg(input_channels=1,
                     num_classes=2,
@@ -270,8 +305,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process data based on version")
     parser.add_argument("--checkpoint", "-ckpt", default=None, type=str, help="Specify the checkpoint")
-    parser.add_argument("--batch_size", default=1, type=int, help="Override Batch size")
-    parser.add_argument("--n_ensemble", default=1, type=int, help="Override number of samples to ensemble")
+    parser.add_argument("--batch_size", default=16, type=int, help="Override Batch size")
+    parser.add_argument("--n_ensemble", default=15, type=int, help="Override number of samples to ensemble")
     parser.add_argument("--filename", default="eval", type=str, help="Specify the eval filename")
     args = parser.parse_args()
     
